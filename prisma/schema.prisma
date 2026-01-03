@@ -1,0 +1,508 @@
+// Prisma Schema for AutomateAI SaaS Platform
+// Database: PostgreSQL (Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// ============================================
+// USER & AUTHENTICATION
+// ============================================
+
+model User {
+  id            String    @id @default(uuid())
+  clerkId       String    @unique
+  email         String    @unique
+  firstName     String?
+  lastName      String?
+  imageUrl      String?
+  username      String?   @unique
+  
+  // Subscription
+  subscriptionTier    SubscriptionTier @default(FREE)
+  subscriptionStatus  SubscriptionStatus @default(ACTIVE)
+  stripeCustomerId    String?   @unique
+  stripeSubscriptionId String?  @unique
+  subscriptionEndsAt  DateTime?
+  
+  // Usage Limits
+  workflowsUsed       Int       @default(0)
+  executionsThisMonth Int       @default(0)
+  storageUsed         Int       @default(0) // in bytes
+  
+  // Metadata
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+  onboardingCompleted Boolean @default(false)
+  
+  // Relations
+  workflows     Workflow[]
+  executions    WorkflowExecution[]
+  apiKeys       ApiKey[]
+  teams         TeamMember[]
+  notifications Notification[]
+  usageLogs     UsageLog[]
+  
+  @@index([clerkId])
+  @@index([email])
+  @@index([subscriptionTier])
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  TRIALING
+}
+
+// ============================================
+// WORKFLOWS
+// ============================================
+
+model Workflow {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  
+  // Workflow Definition
+  nodes       Json     // Workflow nodes configuration
+  connections Json     // Node connections
+  settings    Json?    // Workflow settings
+  
+  // Status
+  status      WorkflowStatus @default(DRAFT)
+  isActive    Boolean  @default(false)
+  isPublic    Boolean  @default(false)
+  
+  // Categorization
+  category    String?
+  tags        String[]
+  
+  // Ownership
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamId      String?
+  team        Team?    @relation(fields: [teamId], references: [id])
+  
+  // Execution Stats
+  totalExecutions     Int      @default(0)
+  successfulExecutions Int     @default(0)
+  failedExecutions    Int      @default(0)
+  lastExecutedAt      DateTime?
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  publishedAt DateTime?
+  
+  // Relations
+  executions  WorkflowExecution[]
+  triggers    WorkflowTrigger[]
+  schedules   WorkflowSchedule[]
+  versions    WorkflowVersion[]
+  
+  @@index([userId])
+  @@index([status])
+  @@index([category])
+  @@index([isPublic])
+}
+
+enum WorkflowStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+model WorkflowVersion {
+  id          String   @id @default(uuid())
+  workflowId  String
+  workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  
+  version     Int
+  nodes       Json
+  connections Json
+  changelog   String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@unique([workflowId, version])
+  @@index([workflowId])
+}
+
+// ============================================
+// WORKFLOW EXECUTION
+// ============================================
+
+model WorkflowExecution {
+  id          String   @id @default(uuid())
+  workflowId  String
+  workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Execution Details
+  status      ExecutionStatus @default(RUNNING)
+  startedAt   DateTime @default(now())
+  finishedAt  DateTime?
+  duration    Int?     // in milliseconds
+  
+  // Data
+  inputData   Json?
+  outputData  Json?
+  errorData   Json?
+  logs        Json[]   @default([])
+  
+  // Metadata
+  triggeredBy String?  // manual, schedule, webhook, api
+  retryCount  Int      @default(0)
+  
+  @@index([workflowId])
+  @@index([userId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+enum ExecutionStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELED
+  TIMEOUT
+}
+
+// ============================================
+// TRIGGERS & SCHEDULES
+// ============================================
+
+model WorkflowTrigger {
+  id          String   @id @default(uuid())
+  workflowId  String
+  workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  
+  type        TriggerType
+  config      Json
+  isActive    Boolean  @default(true)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([workflowId])
+  @@index([type])
+}
+
+enum TriggerType {
+  WEBHOOK
+  SCHEDULE
+  MANUAL
+  API
+  EVENT
+}
+
+model WorkflowSchedule {
+  id          String   @id @default(uuid())
+  workflowId  String
+  workflow    Workflow @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  
+  cronExpression String
+  timezone    String   @default("UTC")
+  isActive    Boolean  @default(true)
+  
+  lastRunAt   DateTime?
+  nextRunAt   DateTime?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([workflowId])
+  @@index([nextRunAt])
+}
+
+// ============================================
+// AI INTEGRATIONS
+// ============================================
+
+model AIModel {
+  id          String   @id @default(uuid())
+  name        String
+  provider    AIProvider
+  modelId     String
+  
+  // Configuration
+  config      Json
+  isActive    Boolean  @default(true)
+  
+  // Usage Stats
+  totalRequests    Int      @default(0)
+  totalTokens      Int      @default(0)
+  totalCost        Float    @default(0)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  conversations AIConversation[]
+  
+  @@unique([provider, modelId])
+  @@index([provider])
+}
+
+enum AIProvider {
+  GEMINI
+  GROQ
+  OPENAI
+  ANTHROPIC
+  CUSTOM
+}
+
+model AIConversation {
+  id          String   @id @default(uuid())
+  userId      String
+  
+  modelId     String
+  model       AIModel  @relation(fields: [modelId], references: [id])
+  
+  title       String?
+  messages    Json[]   @default([])
+  
+  // Metadata
+  tokensUsed  Int      @default(0)
+  cost        Float    @default(0)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([modelId])
+}
+
+// ============================================
+// VECTOR EMBEDDINGS (RAG)
+// ============================================
+
+model Document {
+  id          String   @id @default(uuid())
+  userId      String
+  
+  title       String
+  content     String
+  metadata    Json?
+  
+  // Vector Embedding
+  embedding   Unsupported("vector(1536)")?
+  
+  // Source
+  sourceType  String?  // file, url, text
+  sourceUrl   String?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+}
+
+// ============================================
+// TEAMS & COLLABORATION
+// ============================================
+
+model Team {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  
+  // Subscription
+  subscriptionTier SubscriptionTier @default(FREE)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  members     TeamMember[]
+  workflows   Workflow[]
+  
+  @@index([slug])
+}
+
+model TeamMember {
+  id          String   @id @default(uuid())
+  
+  teamId      String
+  team        Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  role        TeamRole @default(MEMBER)
+  
+  joinedAt    DateTime @default(now())
+  
+  @@unique([teamId, userId])
+  @@index([teamId])
+  @@index([userId])
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ============================================
+// API KEYS
+// ============================================
+
+model ApiKey {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  name        String
+  key         String   @unique
+  
+  // Permissions
+  scopes      String[]
+  
+  // Status
+  isActive    Boolean  @default(true)
+  expiresAt   DateTime?
+  lastUsedAt  DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([key])
+}
+
+// ============================================
+// NOTIFICATIONS
+// ============================================
+
+model Notification {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  type        NotificationType
+  title       String
+  message     String
+  data        Json?
+  
+  isRead      Boolean  @default(false)
+  readAt      DateTime?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([isRead])
+}
+
+enum NotificationType {
+  WORKFLOW_SUCCESS
+  WORKFLOW_FAILED
+  SUBSCRIPTION_UPDATED
+  PAYMENT_FAILED
+  TEAM_INVITE
+  SYSTEM
+}
+
+// ============================================
+// USAGE & ANALYTICS
+// ============================================
+
+model UsageLog {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  resourceType String  // workflow, execution, ai_request
+  resourceId   String?
+  
+  action      String
+  metadata    Json?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([resourceType])
+  @@index([createdAt])
+}
+
+// ============================================
+// MARKETPLACE
+// ============================================
+
+model Template {
+  id          String   @id @default(uuid())
+  
+  name        String
+  description String
+  category    String
+  tags        String[]
+  
+  // Template Data
+  nodes       Json
+  connections Json
+  
+  // Pricing
+  price       Float    @default(0) // 0 = free
+  
+  // Stats
+  downloads   Int      @default(0)
+  rating      Float?
+  reviews     Int      @default(0)
+  
+  // Author
+  authorId    String
+  authorName  String
+  
+  // Status
+  isPublished Boolean  @default(false)
+  isFeatured  Boolean  @default(false)
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([category])
+  @@index([isPublished])
+  @@index([isFeatured])
+}
+
+// ============================================
+// WEBHOOKS
+// ============================================
+
+model Webhook {
+  id          String   @id @default(uuid())
+  userId      String
+  
+  url         String
+  secret      String
+  
+  events      String[] // workflow.completed, workflow.failed, etc.
+  isActive    Boolean  @default(true)
+  
+  // Stats
+  totalCalls  Int      @default(0)
+  lastCalledAt DateTime?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+}
